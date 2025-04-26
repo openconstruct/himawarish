@@ -1,204 +1,306 @@
 #!/usr/bin/env bash
 
+# ====================================================================
+# Himawari-8 Wallpaper Setter
+# This script downloads the latest image from the Himawari-8 satellite
+# and sets it as the desktop wallpaper across multiple desktop environments
+# ====================================================================
+
+set -e  # Exit immediately if a command fails
+
 # === Configuration ===
-# Directory to save the wallpaper image
 SAVE_DIR="${HOME}/Pictures/Wallpapers"
-# Filename for the latest image
 IMAGE_NAME="himawari8_latest.png"
-# Full path to the image file
 IMAGE_PATH="${SAVE_DIR}/${IMAGE_NAME}"
-# Base URL for Himawari-8 images (using the 1d/550px version for simplicity)
 BASE_URL="https://himawari8-dl.nict.go.jp/himawari8/img/D531106"
 JSON_URL="${BASE_URL}/latest.json"
-IMAGE_URL_TEMPLATE="${BASE_URL}/1d/550" # Appends /YYYY/MM/DD/HHMMSS_0_0.png
+IMAGE_URL_TEMPLATE="${BASE_URL}/1d/550"  # Will append /YYYY/MM/DD/HHMMSS_0_0.png
 
-# === Script Logic ===
+# === Helper Functions ===
 
-echo "--- Himawari-8 Wallpaper Setter ---"
-
-# Check dependencies
-if ! command -v wget &> /dev/null; then
-    echo "Error: 'wget' command not found. Please install it." >&2
+# Display error message and exit
+error_exit() {
+    echo "ERROR: $1" >&2
     exit 1
-fi
-if ! command -v jq &> /dev/null; then
-    echo "Error: 'jq' command not found. Please install it (e.g., sudo apt install jq)." >&2
-    exit 1
-fi
+}
 
-# Create save directory if it doesn't exist
-mkdir -p "$SAVE_DIR"
-if [ ! -d "$SAVE_DIR" ]; then
-    echo "Error: Could not create save directory: $SAVE_DIR" >&2
-    exit 1
-fi
+# Check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
 
-# --- Step 1: Get the timestamp of the latest image ---
-echo "Fetching latest image timestamp..."
-# Use mktemp for the temporary JSON file
-JSON_TEMP=$(mktemp)
-if ! wget -q -O "$JSON_TEMP" "$JSON_URL"; then
-    echo "Error: Failed to download latest timestamp JSON from $JSON_URL" >&2
-    rm "$JSON_TEMP"
-    exit 1
-fi
+# Log messages with timestamp
+log_msg() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
 
-# Parse the date string (e.g., "2023-10-27 08:00:00")
-LATEST_DATE_STR=$(jq -r '.date' "$JSON_TEMP")
-rm "$JSON_TEMP" # Clean up temporary file
-
-if [ -z "$LATEST_DATE_STR" ] || [ "$LATEST_DATE_STR" == "null" ]; then
-    echo "Error: Could not parse date from JSON." >&2
-    exit 1
-fi
-echo "Latest image timestamp: $LATEST_DATE_STR"
-
-# --- Step 2: Format timestamp components needed for the URL ---
-# Use 'date -d' which understands the JSON timestamp format
-YEAR=$(date -d "$LATEST_DATE_STR" +%Y)
-MONTH=$(date -d "$LATEST_DATE_STR" +%m)
-DAY=$(date -d "$LATEST_DATE_STR" +%d)
-HOUR=$(date -d "$LATEST_DATE_STR" +%H)
-MINUTE=$(date -d "$LATEST_DATE_STR" +%M)
-SECOND=$(date -d "$LATEST_DATE_STR" +%S)
-
-# Construct the specific image URL
-IMAGE_URL="${IMAGE_URL_TEMPLATE}/${YEAR}/${MONTH}/${DAY}/${HOUR}${MINUTE}${SECOND}_0_0.png"
-echo "Constructed image URL: $IMAGE_URL"
-
-# --- Step 3: Download the latest image ---
-echo "Downloading latest image to $IMAGE_PATH..."
-if ! wget -q -O "$IMAGE_PATH" "$IMAGE_URL"; then
-    echo "Error: Failed to download image from $IMAGE_URL" >&2
-    # Optionally remove partially downloaded file: rm -f "$IMAGE_PATH"
-    exit 1
-fi
-
-# Check if the downloaded file looks like a valid image (basic check)
-if ! file "$IMAGE_PATH" | grep -qE 'image|bitmap'; then
-   echo "Error: Downloaded file does not appear to be a valid image: $IMAGE_PATH" >&2
-   echo "Check the URL manually: $IMAGE_URL"
-   rm -f "$IMAGE_PATH"
-   exit 1
-fi
-
-echo "Image downloaded successfully."
-
-# --- Step 4: Set the wallpaper based on Desktop Environment ---
-echo "Attempting to set wallpaper for detected Desktop Environment..."
-
-# Get absolute path for commands that need it
-ABS_IMAGE_PATH=$(readlink -f "$IMAGE_PATH")
-FILE_URI="file://${ABS_IMAGE_PATH}"
-
-# Detect DE using standard environment variables first
-DESKTOP_ENV=""
-if [ -n "$XDG_CURRENT_DESKTOP" ]; then
-    DESKTOP_ENV=$(echo "$XDG_CURRENT_DESKTOP" | tr '[:upper:]' '[:lower:]')
-elif [ -n "$DESKTOP_SESSION" ]; then
-    DESKTOP_ENV=$(echo "$DESKTOP_SESSION" | tr '[:upper:]' '[:lower:]')
-fi
-
-echo "Detected DE variable: $DESKTOP_ENV"
-
-SET_SUCCESS=false
-
-if [[ "$DESKTOP_ENV" == *"gnome"* ]] || [[ "$DESKTOP_ENV" == *"cinnamon"* ]] || [[ "$DESKTOP_ENV" == *"mate"* ]] || [[ "$DESKTOP_ENV" == *"budgie"* ]]; then
-    echo "Setting wallpaper using gsettings (GNOME/Cinnamon/MATE/Budgie)..."
-    if command -v gsettings &> /dev/null; then
-        # Set for both light and dark modes
-        gsettings set org.gnome.desktop.background picture-uri "$FILE_URI" && \
-        gsettings set org.gnome.desktop.background picture-uri-dark "$FILE_URI"
-        if [ $? -eq 0 ]; then
-             echo "Wallpaper set via gsettings."
-             SET_SUCCESS=true
-        else
-             echo "gsettings command failed." >&2
-        fi
-    else
-        echo "gsettings command not found, cannot set wallpaper for GNOME/Cinnamon/MATE." >&2
+# Set wallpaper using various methods based on desktop environment
+set_wallpaper() {
+    local image_path="$1"
+    local file_uri="file://${image_path}"
+    local success=false
+    
+    log_msg "Attempting to set wallpaper using available methods..."
+    
+    # Try GNOME-based environments (GNOME, Ubuntu, Pop!_OS, Budgie, etc.)
+    if command_exists gsettings; then
+        log_msg "Trying gsettings (GNOME/Ubuntu/Pop!_OS/Budgie)..."
+        gsettings set org.gnome.desktop.background picture-uri "$file_uri" 2>/dev/null && \
+        gsettings set org.gnome.desktop.background picture-uri-dark "$file_uri" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via gsettings."
     fi
-
-elif [[ "$DESKTOP_ENV" == *"xfce"* ]]; then
-    echo "Setting wallpaper using xfconf-query (XFCE)..."
-    if command -v xfconf-query &> /dev/null; then
-        # Find all 'last-image' properties under xfce4-desktop and set them
-        xfconf-query -c xfce4-desktop -l | grep 'last-image$' | while read -r property; do
-             echo "Setting property: $property"
-             xfconf-query -c xfce4-desktop -p "$property" -s "$ABS_IMAGE_PATH"
-        done
-        # Check if at least one property was likely set (heuristic)
-        if xfconf-query -c xfce4-desktop -l | grep -q 'last-image$'; then
-             echo "Wallpaper set via xfconf-query (check all monitors/workspaces)."
-             SET_SUCCESS=true # Assume success if command ran
-        else
-             echo "xfconf-query failed or no properties found." >&2
-        fi
-    else
-        echo "xfconf-query command not found, cannot set wallpaper for XFCE." >&2
+    
+    # Try Cinnamon
+    if ! $success && command_exists gsettings; then
+        log_msg "Trying Cinnamon settings..."
+        gsettings set org.cinnamon.desktop.background picture-uri "$file_uri" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via Cinnamon."
     fi
-
-elif [[ "$DESKTOP_ENV" == *"kde"* ]] || [[ "$DESKTOP_ENV" == *"plasma"* ]]; then
-    echo "Setting wallpaper using qdbus (KDE Plasma)..."
-    if command -v qdbus &> /dev/null; then
-        # KDE Plasma 5/6 script using qdbus
+    
+    # Try MATE
+    if ! $success && command_exists gsettings; then
+        log_msg "Trying MATE settings..."
+        gsettings set org.mate.background picture-filename "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via MATE."
+    fi
+    
+    # Try XFCE
+    if ! $success && command_exists xfconf-query; then
+        log_msg "Trying XFCE settings..."
+        xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/workspace0/last-image -s "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via XFCE."
+        
+        # Try setting for all monitors/workspaces in XFCE
+        if ! $success; then
+            if xfconf-query -c xfce4-desktop -l | grep -q 'last-image$'; then
+                xfconf-query -c xfce4-desktop -l | grep 'last-image$' | while read -r property; do
+                    xfconf-query -c xfce4-desktop -p "$property" -s "$image_path" 2>/dev/null
+                done
+                success=true && log_msg "Wallpaper set for all XFCE workspaces."
+            fi
+        fi
+    fi
+    
+    # Try KDE Plasma
+    if ! $success && command_exists plasma-apply-wallpaperimage; then
+        log_msg "Trying KDE Plasma with plasma-apply-wallpaperimage..."
+        plasma-apply-wallpaperimage "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via plasma-apply-wallpaperimage."
+    elif ! $success && command_exists qdbus; then
+        log_msg "Trying KDE Plasma with qdbus..."
         qdbus_script="
             var allDesktops = desktops();
-            print (allDesktops);
             for (i=0; i<allDesktops.length; i++) {
                 d = allDesktops[i];
                 d.wallpaperPlugin = 'org.kde.image';
                 d.currentConfigGroup = Array('Wallpaper', 'org.kde.image', 'General');
-                d.writeConfig('Image', '$FILE_URI');
+                d.writeConfig('Image', '$file_uri');
             }"
-        qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "$qdbus_script"
-         if [ $? -eq 0 ]; then
-              echo "Wallpaper set via qdbus."
-              SET_SUCCESS=true
-         else
-              echo "qdbus command failed." >&2
-         fi
-    else
-        echo "qdbus command not found. Cannot set wallpaper for KDE Plasma. Try installing qttools5-dev-tools or similar." >&2
+        qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "$qdbus_script" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via KDE qdbus."
+    fi
+    
+    # Try LXQt/LXDE with pcmanfm
+    if ! $success && command_exists pcmanfm-qt; then
+        log_msg "Trying LXQt with pcmanfm-qt..."
+        pcmanfm-qt --set-wallpaper="$image_path" --wallpaper-mode=fit 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via pcmanfm-qt."
+    elif ! $success && command_exists pcmanfm; then
+        log_msg "Trying LXDE with pcmanfm..."
+        pcmanfm --set-wallpaper="$image_path" --wallpaper-mode=fit 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via pcmanfm."
+    fi
+    
+    # Try Enlightenment
+    if ! $success && command_exists enlightenment_remote; then
+        log_msg "Trying Enlightenment..."
+        enlightenment_remote -desktop-bg-add 0 0 0 0 "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via Enlightenment."
+    fi
+    
+    # Try Sway (Wayland)
+    if ! $success && command_exists swaymsg && [ "$WAYLAND_DISPLAY" ]; then
+        log_msg "Trying Sway (Wayland)..."
+        swaymsg "output * bg '$image_path' fill" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via Sway."
+    fi
+    
+    # Try Hyprland (Wayland)
+    if ! $success && command_exists hyprctl && [ "$WAYLAND_DISPLAY" ]; then
+        log_msg "Trying Hyprland (Wayland)..."
+        hyprctl hyprpaper preload "$image_path" 2>/dev/null && \
+        hyprctl hyprpaper wallpaper "eDP-1,$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via Hyprland."
+    fi
+    
+    # Try common wallpaper tools as fallback
+    # feh (commonly used by i3, openbox, and other window managers)
+    if ! $success && command_exists feh; then
+        log_msg "Trying feh (common WM fallback)..."
+        feh --bg-fill "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via feh."
+    fi
+    
+    # hsetroot (alternative to feh)
+    if ! $success && command_exists hsetroot; then
+        log_msg "Trying hsetroot..."
+        hsetroot -fill "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via hsetroot."
+    fi
+    
+    # nitrogen (another common wallpaper setter)
+    if ! $success && command_exists nitrogen; then
+        log_msg "Trying nitrogen..."
+        nitrogen --set-zoom-fill --save "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via nitrogen."
+    fi
+    
+    # xwallpaper (newer alternative)
+    if ! $success && command_exists xwallpaper; then
+        log_msg "Trying xwallpaper..."
+        xwallpaper --zoom "$image_path" 2>/dev/null && \
+        success=true && log_msg "Wallpaper set via xwallpaper."
     fi
 
-elif [[ "$DESKTOP_ENV" == *"lxqt"* ]]; then
-     echo "Setting wallpaper using pcmanfm (LXQt)..."
-     if command -v pcmanfm &> /dev/null; then
-        pcmanfm --set-wallpaper="$ABS_IMAGE_PATH" --wallpaper-mode=stretch # or fit, center, tile
-        if [ $? -eq 0 ]; then
-             echo "Wallpaper set via pcmanfm."
-             SET_SUCCESS=true
-        else
-             echo "pcmanfm command failed." >&2
-        fi
-     else
-         echo "pcmanfm command not found, cannot set wallpaper for LXQt." >&2
-     fi
-fi
+    # Return result
+    $success
+}
 
-# Fallback or specific method for tiling WMs using feh
-if ! $SET_SUCCESS && command -v feh &> /dev/null; then
-    echo "Trying fallback method using feh (common for i3, Sway, etc.)..."
-    feh --bg-scale "$ABS_IMAGE_PATH" # Other options: --bg-center, --bg-fill, --bg-tile
-    if [ $? -eq 0 ]; then
-         echo "Wallpaper set via feh."
-         SET_SUCCESS=true
+# Detect if running in curl or wget environment
+get_download_tool() {
+    if command_exists curl; then
+        echo "curl"
+    elif command_exists wget; then
+        echo "wget"
     else
-         echo "feh command failed." >&2
+        error_exit "Neither curl nor wget found. Please install one of them."
     fi
-elif ! $SET_SUCCESS && [ ! -f "$(command -v feh)" ]; then
-     echo "feh command not found, skipping feh fallback." >&2
+}
+
+# Download file using available tool
+download_file() {
+    local url="$1"
+    local output="$2"
+    local tool=$(get_download_tool)
+    
+    if [ "$tool" = "curl" ]; then
+        curl -s -f -o "$output" "$url" || return 1
+    else
+        wget -q -O "$output" "$url" || return 1
+    fi
+    return 0
+}
+
+# Parse JSON without requiring jq
+parse_json_date() {
+    local json_file="$1"
+    local date_str=""
+    
+    if command_exists jq; then
+        # Use jq if available
+        date_str=$(jq -r '.date' "$json_file")
+    else
+        # Fallback to grep/sed if jq not available
+        date_str=$(grep -o '"date":"[^"]*"' "$json_file" | sed 's/"date":"//;s/"//')
+    fi
+    
+    echo "$date_str"
+}
+
+# === Main Script ===
+
+log_msg "Starting Himawari-8 Wallpaper Setter"
+
+# Create save directory if it doesn't exist
+mkdir -p "$SAVE_DIR" || error_exit "Could not create save directory: $SAVE_DIR"
+
+# Step 1: Get the timestamp of the latest image
+log_msg "Fetching latest image timestamp..."
+JSON_TEMP=$(mktemp) || error_exit "Could not create temporary file"
+download_file "$JSON_URL" "$JSON_TEMP" || error_exit "Failed to download latest timestamp JSON from $JSON_URL"
+
+# Parse the date string
+LATEST_DATE_STR=$(parse_json_date "$JSON_TEMP")
+rm "$JSON_TEMP" # Clean up temporary file
+
+if [ -z "$LATEST_DATE_STR" ] || [ "$LATEST_DATE_STR" = "null" ]; then
+    error_exit "Could not parse date from JSON."
 fi
+log_msg "Latest image timestamp: $LATEST_DATE_STR"
 
+# Step 2: Format timestamp components needed for the URL
+# Handle date formatting across different systems (GNU/BSD date)
+format_date() {
+    local format="$1"
+    local date_str="$2"
+    
+    # Try GNU date format with -d option
+    if date -d "$date_str" +"$format" 2>/dev/null; then
+        return 0
+    fi
+    
+    # Try BSD date format with -j option (macOS)
+    if date -j -f "%Y-%m-%d %H:%M:%S" "$date_str" +"$format" 2>/dev/null; then
+        return 0
+    fi
+    
+    # Manual parsing as last resort
+    local year=$(echo "$date_str" | cut -d'-' -f1)
+    local month=$(echo "$date_str" | cut -d'-' -f2)
+    local day=$(echo "$date_str" | cut -d' ' -f1 | cut -d'-' -f3)
+    local time=$(echo "$date_str" | cut -d' ' -f2)
+    local hour=$(echo "$time" | cut -d':' -f1)
+    local minute=$(echo "$time" | cut -d':' -f2)
+    local second=$(echo "$time" | cut -d':' -f3)
+    
+    case "$format" in
+        "%Y") echo "$year" ;;
+        "%m") echo "$month" ;;
+        "%d") echo "$day" ;;
+        "%H") echo "$hour" ;;
+        "%M") echo "$minute" ;;
+        "%S") echo "$second" ;;
+        *) return 1 ;;
+    esac
+}
 
-# Final status
-if $SET_SUCCESS; then
-    echo "--- Wallpaper updated successfully! ---"
+# Get date components
+YEAR=$(format_date "%Y" "$LATEST_DATE_STR")
+MONTH=$(format_date "%m" "$LATEST_DATE_STR")
+DAY=$(format_date "%d" "$LATEST_DATE_STR")
+HOUR=$(format_date "%H" "$LATEST_DATE_STR")
+MINUTE=$(format_date "%M" "$LATEST_DATE_STR")
+SECOND=$(format_date "%S" "$LATEST_DATE_STR")
+
+# Construct the specific image URL
+IMAGE_URL="${IMAGE_URL_TEMPLATE}/${YEAR}/${MONTH}/${DAY}/${HOUR}${MINUTE}${SECOND}_0_0.png"
+log_msg "Constructed image URL: $IMAGE_URL"
+
+# Step 3: Download the latest image
+log_msg "Downloading latest image to $IMAGE_PATH..."
+download_file "$IMAGE_URL" "$IMAGE_PATH" || error_exit "Failed to download image from $IMAGE_URL"
+
+# Basic image validation
+if command_exists file; then
+    if ! file "$IMAGE_PATH" | grep -qE 'image|bitmap|PNG'; then
+        error_exit "Downloaded file does not appear to be a valid image: $IMAGE_PATH"
+    fi
 else
-    echo "--- Wallpaper could not be set automatically. ---" >&2
-    echo "Image saved to: $IMAGE_PATH" >&2
-    echo "You may need to set it manually using your Desktop Environment's settings." >&2
+    # Simple size check if 'file' command not available
+    if [ ! -s "$IMAGE_PATH" ]; then
+        error_exit "Downloaded file is empty: $IMAGE_PATH"
+    fi
+fi
+
+log_msg "Image downloaded successfully."
+
+# Step 4: Set the wallpaper
+ABS_IMAGE_PATH=$(readlink -f "$IMAGE_PATH" 2>/dev/null || echo "$IMAGE_PATH")
+if set_wallpaper "$ABS_IMAGE_PATH"; then
+    log_msg "Wallpaper set successfully!"
+else
+    log_msg "Could not set wallpaper automatically. Image saved to: $IMAGE_PATH"
+    log_msg "You may need to set it manually using your Desktop Environment's settings."
     exit 1
 fi
 
